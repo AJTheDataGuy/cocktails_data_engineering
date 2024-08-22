@@ -27,7 +27,7 @@ import pandas as pd
 import requests
 
 # Custom Module Imports
-from db_connections import db_connection_funcs
+from scripts.db_connections.superseded import db_connection_funcs
 
 
 def run_spider(

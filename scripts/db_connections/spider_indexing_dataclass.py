@@ -1,3 +1,4 @@
+"""Data class to define setup in SQL"""
 from sqlalchemy import create_engine
 from dataclasses import dataclass
 
@@ -22,14 +23,12 @@ class SpiderIndexSQLSetup:
             setattr(self,prop,kwargs.get(prop,default))
         self.bind_sql_engine()
         
+        
+    def bind_sql_engine(self):
+        """placeholder
+        """
 
-
-def bind_sql_engine(self):
-    """placeholder
-    """
-
-    engine = create_engine(
-        f"{self.sql_engine_str}://{self.user}:{self.password}\
-            @{self.host}:{self.port}/{self.database}"
-    )
-    self.sql_engine = engine
+        engine = create_engine(
+            f"{self.sql_engine_str}://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
+        )
+        self.sql_engine = engine

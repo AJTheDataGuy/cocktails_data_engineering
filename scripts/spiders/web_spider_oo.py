@@ -32,18 +32,23 @@ from time import sleep
 from bs4 import BeautifulSoup
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Custom Module Imports
-from spider_indexing_dataclass import SpiderIndexSQLSetup
+from db_connections.spider_indexing_dataclass import SpiderIndexSQLSetup
+
 
 class WebSpider:
     """Class to scrape text and PDF data from websites"""
-    def __init__(self,
-                 root_site:str,
-                 pen_depth:int,
-                 raw_files_save_path:str,
-                 indexing_definitions_obj:SpiderIndexSQLSetup=None
-                 ):
+
+    def __init__(
+        self,
+        root_site: str,
+        pen_depth: int,
+        raw_files_save_path: str,
+        indexing_definitions_obj: SpiderIndexSQLSetup = None,
+    ):
         """Parameters are defined as follows:
 
         1. Root site: The homepage / domain of the website to scrape
@@ -68,10 +73,12 @@ class WebSpider:
 
         if indexing_definitions_obj is not None:
             try:
-                assert isinstance(indexing_definitions_obj,SpiderIndexSQLSetup)
+                assert isinstance(indexing_definitions_obj, SpiderIndexSQLSetup)
             except AssertionError as ae:
-                raise ValueError("Error: indexing definitions must\
-                              be part of a SpiderIndexSQLSetup class instance") from ae
+                raise ValueError(
+                    "Error: indexing definitions must\
+                              be part of a SpiderIndexSQLSetup class instance"
+                ) from ae
             self.indexing_definitions_obj = indexing_definitions_obj
             self.indexing_on = True
         else:
@@ -80,7 +87,6 @@ class WebSpider:
         self.unique_links_set = set()
         self.bind_session_with_header()
         self.bind_filter_word_list()
-        
 
     def run_spider(self):
         """Runs the web spider. Main routine for the class."""
@@ -88,6 +94,7 @@ class WebSpider:
             parent_level_links = {self.root_site} if depth == 0 else child_level_links
             child_level_links = set()
             for parent_link in parent_level_links:
+                print(f"Now working on {parent_link}...")
                 # Only capture each web page once
                 if parent_link in self.unique_links_set:
                     continue
@@ -98,48 +105,69 @@ class WebSpider:
                     continue
 
                 # Save the raw file - text or PDF
-                if parent_link.lower().endswith('pdf'):
-                    self.save_webpage_as_pdf(parent_link,site_request)
-                elif parent_link.lower().endswith('xlsx'):
+                if parent_link.lower().endswith("pdf"):
+                    self.save_webpage_as_pdf(parent_link, site_request)
+                elif parent_link.lower().endswith("xlsx"):
                     continue
-                elif parent_link.lower().endswith('xls'):
+                elif parent_link.lower().endswith("xls"):
                     continue
                 else:
-                    self.save_webpage_as_text(parent_link,site_request)
+                    self.save_webpage_as_text(parent_link, site_request)
 
                 # Transform - find and clean the links to keep the spider out of trouble
                 raw_child_links = self.get_all_links_from_page(site_request)
                 cleaned_child_links = self.clean_webpage_links(raw_child_links)
+                print(cleaned_child_links)
                 child_level_links.update(cleaned_child_links)
 
                 if self.indexing_on:
                     # Record parent child link relationships
-                    parent_child_df = self.create_parent_child_dataframe(parent_link, 
-                                                                     child_level_links)
-                    self.upload_data_to_sql(parent_child_df,flag="index")
+                    parent_child_df = self.create_parent_child_dataframe(
+                        parent_link, child_level_links, depth
+                    )
+                    self.upload_data_to_sql(parent_child_df, flag="index")
 
         if self.indexing_on:
             # Upload final list of unique links to sql
             # As a dataframe
+            # Then dispose of the object
+            # NOTE: Need to add the child links to be included
+            self.unique_links_set.update(set(child_level_links))
             unique_links_df = self.create_unique_links_df()
-            self.upload_data_to_sql(unique_links_df,flag="unique_links")
-        self.indexing_definitions_obj.sql_engine.dispose()
-
+            self.upload_data_to_sql(unique_links_df, flag="unique_links")
+            self.indexing_definitions_obj.sql_engine.dispose()
 
     def bind_session_with_header(self) -> requests.Session:
         """Returns a session object with a predefined
         user agent header. In the future authentication can
         be added as well.
         """
-        agent = "".join(["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_2) ",
-                        "AppleWebKit/601.3.9 (KHTML, like Gecko) ",
-                        "Version/9.0.2 Safari/601.3.9"])
+        agent = "".join(
+            [
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_2) ",
+                "AppleWebKit/601.3.9 (KHTML, like Gecko) ",
+                "Version/9.0.2 Safari/601.3.9",
+            ]
+        )
         session = requests.Session()
-        headers = {
-            "User-Agent": f"{agent}"
-        }
+        headers = {"User-Agent": f"{agent}"}
         session.headers.update(headers)
         self.session = session
+        self.attach_retry_strategy_to_session()
+
+    def attach_retry_strategy_to_session(self):
+        retry_strategy = Retry(
+        total=5,  # Total number of retries
+        backoff_factor=10,  # Delay between retries (e.g., 1 second, 2 seconds, 4 seconds)
+        status_forcelist=[500, 502, 503, 504],  # HTTP status codes to retry on
+        allowed_methods=["GET"]  # Retry only on GET requests
+    )
+        # Create an HTTPAdapter using the Retry strategy
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+
+        # mount the adapter to session
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
     def bind_filter_word_list(self):
         """Defines a list of substrings
@@ -167,24 +195,33 @@ class WebSpider:
         filter_words_list = [
             "career",
             "login",
+            "main-content",
             "pay",
             "your",
+            "form",
+            "#",
             "account",
             "auth",
             "contact",
             "activate",
             "reservation",
             "book",
-            'tel',
-            'facebook',
-            'instagram',
-            'subscribe',
-            'google',
-            'linkedin',
-            'youtube',
-            'mail',
-            'app',
-            'App'
+            "tel",
+            "facebook",
+            "instagram",
+            "subscribe",
+            "google",
+            "linkedin",
+            "youtube",
+            "mail",
+            "app",
+            "App",
+            "help",
+            "sponsor",
+            "terms",
+            "twitter",
+            "@",
+            "google"
         ]
         self.filter_word_list = filter_words_list
 
@@ -207,10 +244,14 @@ class WebSpider:
         Returns the request
         """
         sleep(randint(min_delay_s, max_delay_s))
-        return self.session.get(parent_link, allow_redirects=allow_redirects, timeout=timeout)
-    
+        return self.session.get(
+            parent_link, allow_redirects=allow_redirects, timeout=timeout
+        )
+
     @staticmethod
-    def get_all_links_from_page(returned_request, parse_mode:str="html.parser") -> list:
+    def get_all_links_from_page(
+        returned_request, parse_mode: str = "html.parser"
+    ) -> list:
         """Returns all the <a> tag links from a single webpage
         as a list of links
         """
@@ -221,8 +262,7 @@ class WebSpider:
             links_list.append(link.get("href"))
         return links_list
 
-
-    def clean_webpage_links(self,links_list: list) -> set:
+    def clean_webpage_links(self, links_list: list) -> set:
         """Cleans the list of links from a single webpage
         to help keep the web spider out of trouble
 
@@ -232,6 +272,7 @@ class WebSpider:
 
         1. Careers (keeps the spider from looking like it is applying for jobs)
         2. Contact Us pages (keeps the spider from accidently contacting anyone)
+            Note: includes removing any telephone pages
         3. Login pages (keeps the spider from being detected - login pages will
         require a post and not a get)
         4. Any other https listed pages
@@ -245,17 +286,21 @@ class WebSpider:
         links to the same website
 
         Returns a cleaned set of unique links
+
+        FUTURE: add option to stay on website
         """
-        clean_links = []
-        for link_tuples in product(links_list, self.filter_word_list):
-            if (link_tuples[1] not in link_tuples[0]) and (
-                link_tuples[0] not in (None, "/")
-            ):
-                clean_links.append(link_tuples[0])
-        return set(clean_links)
+        # Remove links with filtered words
+        filtered_links = [
+                            link for link in links_list \
+                                if link not in (None, "/")\
+                                    and not any(sub in (link or '') for sub in self.filter_word_list)
+                        ]
+        # Add root site to links in case of links like "/about-us" being returned
+        filtered_links = [self.root_site + link[1:] for link in filtered_links if link[0]=="/"]
+        return set(filtered_links)
 
     def create_parent_child_dataframe(
-        self, parent_link: str, child_links: set
+        self, parent_link: str, child_links: set,depth:int
     ) -> pd.DataFrame:
         """Creates a data structure (pandas dataframe)
         to record parent-child relationships and depth
@@ -268,9 +313,10 @@ class WebSpider:
 
         Returns a dataframe with all the parent-child relationships for the parent link
         """
-        tuples_list = list(product([self.pen_depth], [parent_link], child_links))
-        return pd.DataFrame(tuples_list, columns=["pen_depth", "parent_link", "child_link"])
-
+        tuples_list = list(product([depth], [parent_link], child_links))
+        return pd.DataFrame(
+            tuples_list, columns=["pen_depth", "parent_link", "child_link"]
+        )
 
     def create_unique_links_df(self) -> pd.DataFrame:
         """Converts the list of unique links
@@ -279,12 +325,7 @@ class WebSpider:
         unique_link_tuples_list = list(enumerate(self.unique_links_set))
         return pd.DataFrame(unique_link_tuples_list, columns=["link_id", "link_name"])
 
-
-    def upload_data_to_sql(
-        self,
-        data_df: pd.DataFrame,
-        flag:str
-    ):
+    def upload_data_to_sql(self, data_df: pd.DataFrame, flag: str):
         """Only applies if indexing is turned on.
         Uploads data for child-parent link relationships
         and a list of unique links into SQL.
@@ -298,49 +339,52 @@ class WebSpider:
             schema = self.indexing_definitions_obj.unique_links_schema
         else:
             raise ValueError("Error: flag must be either 'index' or 'unique_links'")
-        
+
         data_df.to_sql(
             name=table_name,
             con=self.indexing_definitions_obj.sql_engine,
             schema=schema,
             if_exists="append",
             index=False,
-            method="multi"
+            method="multi",
         )
 
-    def save_webpage_as_text(self,web_url:str,returned_request):
+    def save_webpage_as_text(self, web_url: str, returned_request):
         """Saves webpage text locally as a .txt file"""
-        save_name = self.generate_output_file_name(web_url,file_type_flag="txt")
-        with open(self.raw_files_save_path+save_name+'.txt','a') as file:
-            file.write(f"root_site:{self.root_site}"+"\n")
-            file.write(f"web_url:{web_url}"+"\n")
-            file.write(returned_request.text)
-    
-    def save_webpage_as_pdf(self,web_url:str,returned_request):
+        save_name = self.generate_output_file_name(web_url, file_type_flag="txt")
+        soup = BeautifulSoup(returned_request.text,"html.parser")
+        with open(self.raw_files_save_path + save_name, "w") as file:
+            file.write(f"root_site:{self.root_site}" + "\n")
+            file.write(f"web_url:{web_url}" + "\n")
+            file.write(soup.text)
+
+    def save_webpage_as_pdf(self, web_url: str, returned_request):
         """Saves webpage pdf files locally as a .pdf file"""
-        save_name = self.generate_output_file_name(web_url,file_type_flag="pdf")
-        with open(self.raw_files_save_path+save_name+'.pdf','wb') as file:
+        save_name = self.generate_output_file_name(web_url, file_type_flag="pdf")
+        with open(self.raw_files_save_path + save_name, "wb") as file:
             file.write(returned_request.content)
 
-    
-    def generate_output_file_name(self,webpage:str,file_type_flag:str)->str:
+    def generate_output_file_name(self, webpage: str, file_type_flag: str) -> str:
         """Gives each webpage a unique file name for saving locally
+        Unique name is a combination of parent site and unique md5 code
+        so for example: picabar.com.au_ab35322bc.txt
+
         Returns the unique name
+
+        NOTE: Need to test for case with long root site name.
+        Max file name is 255 characters and md5 should be about 32 characters
+        so root site should be about 200 characters or less
         """
         try:
-            assert file_type_flag.lower() in ('pdf','txt')
+            assert file_type_flag.lower() in ("pdf", "txt")
         except AssertionError as ae:
             raise ValueError("Error: flag must be pdf or text") from ae
-        cleaned_root = self.root_site.replace("\\","_").replace("/","_")
-        unique_url_hash = hashlib.md5((self.root_site+webpage).encode()).hexdigest()
-        output_name = "".join([cleaned_root,
-                               unique_url_hash,
-                               ".",
-                               file_type_flag.lower()])
+        cleaned_root = (
+            self.root_site.replace("\\", "_").replace("/", "_").replace("?", "_").replace(":","_")
+        )
+        cleaned_webpage = webpage.replace("\\", "_").replace("/", "_").replace("?", "_").replace(":","_")
+        #unique_url_hash = hashlib.md5((self.root_site + webpage).encode()).hexdigest()
+        output_name = "".join(
+            [cleaned_root, "_", cleaned_webpage, ".", file_type_flag.lower()]
+        )
         return output_name
-
-
-
-
-
-
